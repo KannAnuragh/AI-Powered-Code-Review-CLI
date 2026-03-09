@@ -40,8 +40,18 @@ jobs:
             echo "empty=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Set review mode based on diff size
+      - name: Check GROQ_API_KEY
         if: steps.check.outputs.empty == 'false'
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          if [ -z "$GROQ_API_KEY" ]; then
+            echo "::warning::GROQ_API_KEY not configured — skipping AI review"
+            echo "SKIP_REVIEW=true" >> $GITHUB_ENV
+          fi
+
+      - name: Set review mode based on diff size
+        if: steps.check.outputs.empty == 'false' && env.SKIP_REVIEW != 'true'
         run: |
           DIFF_SIZE=${{ steps.diff.outputs.diff_size }}
           if [ "$DIFF_SIZE" -gt "500000" ]; then
@@ -61,7 +71,7 @@ jobs:
         run: pip install -e .
 
       - name: Run AI Code Review
-        if: steps.check.outputs.empty == 'false'
+        if: steps.check.outputs.empty == 'false' && env.SKIP_REVIEW != 'true'
         id: review
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -76,7 +86,7 @@ jobs:
         continue-on-error: true
 
       - name: Generate SARIF output
-        if: steps.check.outputs.empty == 'false'
+        if: steps.check.outputs.empty == 'false' && env.SKIP_REVIEW != 'true'
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
@@ -87,7 +97,7 @@ jobs:
             --no-cache
 
       - name: Validate SARIF before upload
-        if: steps.check.outputs.empty == 'false'
+        if: steps.check.outputs.empty == 'false' && env.SKIP_REVIEW != 'true'
         run: |
           python -c "
 import json
@@ -99,7 +109,7 @@ print(f'Valid SARIF: {results_count} result(s)')
 "
 
       - name: Upload SARIF to GitHub Code Scanning
-        if: steps.check.outputs.empty == 'false'
+        if: steps.check.outputs.empty == 'false' && env.SKIP_REVIEW != 'true'
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: review_result.sarif
@@ -107,7 +117,7 @@ print(f'Valid SARIF: {results_count} result(s)')
         continue-on-error: true
 
       - name: Post inline PR review comments
-        if: steps.check.outputs.empty == 'false'
+        if: steps.check.outputs.empty == 'false' && env.SKIP_REVIEW != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -121,7 +131,7 @@ print(f'Valid SARIF: {results_count} result(s)')
             --sha $HEAD_SHA
 
       - name: Post summary comment
-        if: steps.check.outputs.empty == 'false'
+        if: steps.check.outputs.empty == 'false' && env.SKIP_REVIEW != 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -211,7 +221,7 @@ print(f'Valid SARIF: {results_count} result(s)')
             });
 
       - name: Set commit status
-        if: always() && steps.check.outputs.empty == 'false'
+        if: always() && steps.check.outputs.empty == 'false' && env.SKIP_REVIEW != 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -242,5 +252,5 @@ print(f'Valid SARIF: {results_count} result(s)')
             });
 
       - name: Write job summary
-        if: always() && steps.check.outputs.empty == 'false'
+        if: always() && steps.check.outputs.empty == 'false' && env.SKIP_REVIEW != 'true'
         run: python .github/scripts/write_job_summary.py review_result.json

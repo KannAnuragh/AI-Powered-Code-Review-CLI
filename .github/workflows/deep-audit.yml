@@ -19,20 +19,44 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Generate diff from last merge
+      - name: Check GROQ_API_KEY
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
-          git diff HEAD~1...HEAD > merge.patch
-          git diff HEAD~1...HEAD --name-only > changed_files.txt
+          if [ -z "$GROQ_API_KEY" ]; then
+            echo "::warning::GROQ_API_KEY not configured — skipping deep audit"
+            echo "SKIP_AUDIT=true" >> $GITHUB_ENV
+          fi
+
+      - name: Generate diff from last merge
+        if: env.SKIP_AUDIT != 'true'
+        run: |
+          if git rev-parse HEAD~1 >/dev/null 2>&1; then
+            git diff HEAD~1...HEAD > merge.patch
+            git diff HEAD~1...HEAD --name-only > changed_files.txt
+          else
+            EMPTY_TREE=$(git hash-object -t tree /dev/null)
+            git diff "$EMPTY_TREE" HEAD > merge.patch
+            git diff "$EMPTY_TREE" HEAD --name-only > changed_files.txt
+          fi
+
+          if [ ! -s merge.patch ]; then
+            echo "::warning::Empty diff — skipping deep audit"
+            echo "SKIP_AUDIT=true" >> $GITHUB_ENV
+          fi
 
       - uses: actions/setup-python@v5
+        if: env.SKIP_AUDIT != 'true'
         with:
           python-version: "3.12"
           cache: "pip"
 
       - name: Install CodeRev
+        if: env.SKIP_AUDIT != 'true'
         run: pip install -e .
 
       - name: Run full deep review
+        if: env.SKIP_AUDIT != 'true'
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
@@ -50,12 +74,14 @@ jobs:
             --no-cache
 
       - name: Upload SARIF
+        if: env.SKIP_AUDIT != 'true'
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: deep_review.sarif
           category: coderev-deep-audit
 
       - name: Save review artifact
+        if: env.SKIP_AUDIT != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: deep-audit-results

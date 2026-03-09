@@ -30,21 +30,24 @@ jobs:
       - name: Install CodeRev
         run: pip install -e .
 
-      - name: Verify GROQ_API_KEY is set
+      - name: Check GROQ_API_KEY
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
-          if [ -z "${{ secrets.GROQ_API_KEY }}" ]; then
-            echo "GROQ_API_KEY not configured — skipping eval"
-            exit 0
+          if [ -z "$GROQ_API_KEY" ]; then
+            echo "::warning::GROQ_API_KEY not configured — skipping eval"
+            echo "SKIP_EVAL=true" >> $GITHUB_ENV
           fi
 
       - name: Run eval suite
+        if: env.SKIP_EVAL != 'true'
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           coderev eval --threshold 0.80 --fail
 
       - name: Upload eval results
-        if: always()
+        if: always() && env.SKIP_EVAL != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: eval-results-${{ github.run_id }}
@@ -52,7 +55,7 @@ jobs:
           retention-days: 90
 
       - name: Write eval summary
-        if: always()
+        if: always() && env.SKIP_EVAL != 'true'
         run: |
           python - <<'EOF'
           import json, os
