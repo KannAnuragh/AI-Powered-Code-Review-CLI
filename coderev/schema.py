@@ -94,6 +94,8 @@ class ReviewMetadata(BaseModel):
     processing_time_seconds: float = Field(..., ge=0, description="Time taken for the review")
     diff_lines: int = Field(..., ge=0, description="Number of lines in the diff")
     files_reviewed: int = Field(..., ge=0, description="Number of files reviewed")
+    cache_hit_rate: float = 0.0
+    cache_entries_used: int = 0  
 
 
 class CodeReviewResult(BaseModel):

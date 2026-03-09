@@ -40,3 +40,12 @@ Desktop.ini
 
 # Build artifacts
 *.log
+
+# Generated review artifacts
+review_output.json
+review_output.sarif
+review_stderr.txt
+*.patch
+pr.patch
+merge.patch
+weekly.patch

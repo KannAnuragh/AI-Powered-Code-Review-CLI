@@ -1,0 +1,65 @@
+name: CodeRev Deep Audit
+
+on:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  deep-audit:
+    name: Deep AI Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Generate diff from last merge
+        run: |
+          git diff HEAD~1...HEAD > merge.patch
+          git diff HEAD~1...HEAD --name-only > changed_files.txt
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install CodeRev
+        run: pip install -e .
+
+      - name: Run full deep review
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          coderev review \
+            --diff merge.patch \
+            --format sarif \
+            --output deep_review.sarif \
+            --no-cache \
+            --min-confidence 0.7
+
+          coderev review \
+            --diff merge.patch \
+            --format json \
+            --output deep_review.json \
+            --no-cache
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: deep_review.sarif
+          category: coderev-deep-audit
+
+      - name: Save review artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deep-audit-results
+          path: |
+            deep_review.json
+            deep_review.sarif
+          retention-days: 30

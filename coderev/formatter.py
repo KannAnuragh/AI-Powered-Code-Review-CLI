@@ -254,6 +254,11 @@ class Formatter:
             f"{score_message}"
         )
         
+        # Cache stats
+        if result.metadata.cache_hit_rate > 0:
+            cache_info = f"Cache: {result.metadata.cache_hit_rate:.0%} hit"
+            self.console.print(f"  [dim]{cache_info}[/dim]")
+
         # Token usage and cost
         total_tokens = result.metadata.total_tokens
         cost = estimate_cost(input_tokens, output_tokens, result.metadata.model)

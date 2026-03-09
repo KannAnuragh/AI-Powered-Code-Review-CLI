@@ -69,12 +69,12 @@ LANGUAGE_MAPPING: dict[str, str] = {
 }
 
 # Token pricing per model (input_rate, output_rate) in USD per token
-# Last updated: 2026-03-06
+# Last updated: 2026-03-06 — verify at https://console.groq.com/docs/models
 MODEL_PRICING: dict[str, tuple[float, float]] = {
-    "kimi-k2-0528": (0.0000014, 0.0000014),           # $1.40/M tokens in+out
-    "moonshotai/kimi-k2": (0.0000014, 0.0000014),     # alias
-    "llama-4-scout": (0.0000001, 0.0000001),           # fallback model
-    "qwen-3-32b": (0.0000009, 0.0000009),              # fallback model
+    "moonshotai/kimi-k2-instruct": (0.0000014, 0.0000014),       # $1.40/M tokens in+out (same rate)
+    "meta-llama/llama-4-scout-17b-16e-instruct": (0.0000001, 0.0000001),
+    "qwen/qwen3-32b": (0.0000009, 0.0000009),
+    "default": (0.0000014, 0.0000014),                             # fallback for unknown models
 }
 
 
@@ -165,7 +165,7 @@ def estimate_cost(input_tokens: int, output_tokens: int, model: str) -> float:
         Estimated cost in USD, rounded to 4 decimal places
     """
     # Default to Kimi K2 pricing if model not found
-    input_rate, output_rate = MODEL_PRICING.get(model, (0.0000014, 0.0000014))
+    input_rate, output_rate = MODEL_PRICING.get(model, MODEL_PRICING["default"])
     cost = (input_tokens * input_rate) + (output_tokens * output_rate)
     return round(cost, 4)
 
@@ -291,3 +291,78 @@ def truncate_diff_for_display(diff: str, max_lines: int = 50) -> str:
     truncated = '\n'.join(lines[:max_lines])
     remaining = len(lines) - max_lines
     return f"{truncated}\n... ({remaining} more lines)"
+
+
+def build_diff_position_map(diff: str) -> dict[tuple[str, int], int]:
+    """Build a mapping from (file_path, file_line_number) to diff_position.
+
+    GitHub's PR comment API requires diff_position (1-indexed position within
+    the diff output), not actual file line numbers. This function parses the
+    diff to build the mapping so findings can be placed inline correctly.
+
+    Handles renamed files: when a diff contains ``rename from old_name.py`` /
+    ``rename to new_name.py``, entries are stored under *both* paths so that
+    findings referencing either the old or new name resolve correctly.
+
+    Returns:
+        dict mapping (file_path, line_number) to diff_position
+    """
+    position_map: dict[tuple[str, int], int] = {}
+    current_file: str | None = None
+    diff_position = 0
+    current_file_line = 0
+
+    # Track rename pairs so we can duplicate entries under the old name
+    rename_from: str | None = None
+    rename_aliases: dict[str, str] = {}  # new_name -> old_name
+
+    for line in diff.split("\n"):
+        # Detect rename headers *before* the +++ line
+        rename_from_match = re.match(r"^rename from (.+)$", line)
+        if rename_from_match:
+            rename_from = rename_from_match.group(1)
+            diff_position += 1
+            continue
+
+        rename_to_match = re.match(r"^rename to (.+)$", line)
+        if rename_to_match and rename_from is not None:
+            rename_aliases[rename_to_match.group(1)] = rename_from
+            rename_from = None
+            diff_position += 1
+            continue
+
+        file_match = re.match(r"^\+\+\+ b/(.+)$", line)
+        if file_match:
+            current_file = file_match.group(1)
+            diff_position += 1
+            continue
+
+        hunk_match = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+        if hunk_match:
+            current_file_line = int(hunk_match.group(1)) - 1
+            diff_position += 1
+            continue
+
+        if current_file is None:
+            diff_position += 1
+            continue
+
+        if line.startswith("+"):
+            current_file_line += 1
+            diff_position += 1
+            position_map[(current_file, current_file_line)] = diff_position
+            # Alias: also store under old name so findings using it resolve
+            if current_file in rename_aliases:
+                position_map[(rename_aliases[current_file], current_file_line)] = diff_position
+        elif line.startswith("-"):
+            diff_position += 1
+        elif line.startswith(" "):
+            current_file_line += 1
+            diff_position += 1
+            position_map[(current_file, current_file_line)] = diff_position
+            if current_file in rename_aliases:
+                position_map[(rename_aliases[current_file], current_file_line)] = diff_position
+        elif line.startswith("diff ") or line.startswith("index ") or line.startswith("---"):
+            diff_position += 1
+
+    return position_map

@@ -3,6 +3,7 @@
 import pytest
 
 from coderev.utils import (
+    build_diff_position_map,
     detect_language,
     detect_languages_in_diff,
     estimate_cost,
@@ -98,7 +99,7 @@ class TestEstimateCost:
         # 1000 input tokens at $0.0000014 = $0.0014
         # 500 output tokens at $0.0000014 = $0.0007
         # Total = $0.0021
-        cost = estimate_cost(1000, 500, "kimi-k2-0528")
+        cost = estimate_cost(1000, 500, "moonshotai/kimi-k2-instruct")
         assert cost == 0.0021
     
     def test_llama_scout_cost(self):
@@ -106,7 +107,7 @@ class TestEstimateCost:
         # 1000 input tokens at $0.0000001 = $0.0001
         # 500 output tokens at $0.0000001 = $0.00005
         # Total = $0.00015 -> rounds to $0.0001 (4 decimal places)
-        cost = estimate_cost(1000, 500, "llama-4-scout")
+        cost = estimate_cost(1000, 500, "meta-llama/llama-4-scout-17b-16e-instruct")
         assert cost == 0.0001
     
     def test_unknown_model_defaults_to_kimi_k2(self):
@@ -129,6 +130,14 @@ class TestFormatCost:
     def test_normal_cost(self):
         """Test formatting normal costs."""
         assert format_cost(0.023) == "~$0.02"
+
+    def test_costs_above_threshold_show_approximate(self):
+        """Costs >= $0.01 use approximate prefix."""
+        assert format_cost(0.05).startswith("~$")
+
+    def test_costs_below_threshold_show_less_than(self):
+        """Costs < $0.001 use less-than prefix."""
+        assert format_cost(0.0001).startswith("<$")
 
 
 class TestGetSeverityExitCode:
@@ -218,3 +227,83 @@ diff --git a/file.xyz b/file.xyz
         languages = detect_languages_in_diff(diff)
         assert "Python" in languages
         assert "Unknown" not in languages
+
+
+class TestDiffPositionMap:
+    """Tests for the diff position mapper used by inline PR comments."""
+
+    def test_added_line_gets_position(self):
+        diff = (
+            "diff --git a/app.py b/app.py\n"
+            "+++ b/app.py\n"
+            "@@ -0,0 +1,3 @@\n"
+            "+def hello():\n"
+            "+    return 1\n"
+            "+\n"
+        )
+        pos_map = build_diff_position_map(diff)
+        assert ("app.py", 1) in pos_map
+
+    def test_removed_line_not_in_map(self):
+        diff = (
+            "+++ b/app.py\n"
+            "@@ -1,2 +1,1 @@\n"
+            "-old_line\n"
+            "+new_line\n"
+        )
+        pos_map = build_diff_position_map(diff)
+        assert ("app.py", 1) in pos_map
+
+    def test_context_lines_in_map(self):
+        diff = (
+            "+++ b/app.py\n"
+            "@@ -5,3 +5,4 @@\n"
+            " context_line\n"
+            "+added_line\n"
+            " another_context\n"
+        )
+        pos_map = build_diff_position_map(diff)
+        assert ("app.py", 5) in pos_map
+        assert ("app.py", 6) in pos_map
+        assert ("app.py", 7) in pos_map
+
+    def test_multiple_files_in_map(self):
+        diff = (
+            "+++ b/file_a.py\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+line_a_1\n"
+            "+line_a_2\n"
+            "+++ b/file_b.py\n"
+            "@@ -0,0 +1,1 @@\n"
+            "+line_b_1\n"
+        )
+        pos_map = build_diff_position_map(diff)
+        assert ("file_a.py", 1) in pos_map
+        assert ("file_a.py", 2) in pos_map
+        assert ("file_b.py", 1) in pos_map
+
+    def test_empty_diff_returns_empty_map(self):
+        assert build_diff_position_map("") == {}
+
+    def test_renamed_file_accessible_by_both_names(self):
+        """Renamed files should be reachable via old and new name."""
+        diff = (
+            "diff --git a/old_name.py b/new_name.py\n"
+            "similarity index 95%\n"
+            "rename from old_name.py\n"
+            "rename to new_name.py\n"
+            "--- a/old_name.py\n"
+            "+++ b/new_name.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            " unchanged\n"
+            "-old_line\n"
+            "+new_line\n"
+            " more_context\n"
+        )
+        pos_map = build_diff_position_map(diff)
+        # New name is in the map
+        assert ("new_name.py", 1) in pos_map
+        # Old name is also in the map (alias)
+        assert ("old_name.py", 1) in pos_map
+        # Both resolve to the same diff position
+        assert pos_map[("new_name.py", 2)] == pos_map[("old_name.py", 2)]

@@ -14,8 +14,8 @@ from dotenv import load_dotenv
 from rich.console import Console
 
 from . import __version__
-from .agent import CodeReviewAgent
 from .formatter import Formatter
+from .pipeline import ReviewPipeline
 from .schema import Severity
 from .utils import (
     extract_files_from_diff,
@@ -96,7 +96,7 @@ def review(
             "-m",
             help="Model to use",
         ),
-    ] = "kimi-k2-0528",
+    ] = "moonshotai/kimi-k2-instruct",
     format: Annotated[
         str,
         typer.Option(
@@ -128,6 +128,13 @@ def review(
             max=1.0,
         ),
     ] = 0.0,
+    no_cache: Annotated[
+        bool,
+        typer.Option(
+            "--no-cache",
+            help="Disable local chunk cache",
+        ),
+    ] = False,
     context: Annotated[
         Optional[str],
         typer.Option(
@@ -147,7 +154,7 @@ def review(
         coderev review --diff changes.patch --format json --output results.json
     """
     # Validate format
-    valid_formats = ["rich", "json", "markdown"]
+    valid_formats = ["rich", "json", "markdown", "sarif"]
     if format not in valid_formats:
         console.print(f"[red]Error:[/red] Invalid format '{format}'. Use one of: {', '.join(valid_formats)}")
         raise typer.Exit(1)
@@ -164,6 +171,9 @@ def review(
         console.print("[red]Error:[/red] GROQ_API_KEY environment variable not set.")
         console.print("Set it in your .env file or export it: export GROQ_API_KEY=your_key")
         raise typer.Exit(1)
+
+    # Use env override for model if set
+    model = os.getenv("CODEREV_MODEL", model)
     
     # Read diff content
     diff_content: Optional[str] = None
@@ -206,15 +216,18 @@ def review(
     if format == "rich":
         console.print(f"[dim]Reviewing {len(file_paths)} file(s) with {model}...[/dim]")
     
-    # Initialize agent and run review
+    # Initialize pipeline and run review
     try:
-        agent = CodeReviewAgent(api_key=api_key, model=model)
-        result = agent.review(
+        pipeline = ReviewPipeline(
+            api_key=api_key,
+            model=model,
+            use_cache=not no_cache,
+        )
+        result = pipeline.run(
             diff=diff_content,
             file_paths=file_paths,
-            additional_context=context
         )
-        input_tokens, output_tokens = agent.last_token_usage
+        input_tokens, output_tokens = pipeline.last_token_usage
     except Exception as e:
         console.print(f"[red]Error during review:[/red] {e}")
         raise typer.Exit(1)
@@ -230,6 +243,17 @@ def review(
         if filtered_count > 0 and format == "rich":
             console.print(f"[dim]Filtered {filtered_count} low-confidence finding(s)[/dim]")
     
+    # SARIF format handled separately — not part of the Formatter class
+    if format == "sarif":
+        from .sarif import sarif_to_string
+        formatted_output = sarif_to_string(result)
+        print(formatted_output)
+        if output:
+            output.write_text(formatted_output, encoding="utf-8")
+            console.print(f"[dim]SARIF results saved to {output}[/dim]", stderr=True)
+        exit_code = get_severity_exit_code(result.findings, fail_on)
+        raise typer.Exit(exit_code)
+
     # Format output
     formatter = Formatter(console)
     formatted_output = formatter.format(
@@ -239,9 +263,9 @@ def review(
         output_tokens=output_tokens
     )
     
-    # For json/markdown, print the output
+    # For json/markdown, print the output (plain print to avoid Rich markup)
     if format in ["json", "markdown"]:
-        console.print(formatted_output)
+        print(formatted_output)
     
     # Save to file if requested
     if output:
@@ -265,10 +289,39 @@ def review(
 
 
 @app.command()
+def cache(
+    clear: Annotated[
+        bool,
+        typer.Option("--clear", help="Clear all cached results"),
+    ] = False,
+    stats: Annotated[
+        bool,
+        typer.Option("--stats", help="Show cache statistics"),
+    ] = False,
+) -> None:
+    """Manage the local chunk cache."""
+    from .cache import ChunkCache
+
+    c = ChunkCache()
+    if clear:
+        count = c.clear()
+        console.print(f"Cleared {count} cached entries")
+    if stats:
+        s = c.stats
+        console.print(
+            f"Cache: {s['entry_count']} entries | "
+            f"Hit rate: {s['hit_rate']:.0%} | "
+            f"Dir: {s['cache_dir']}"
+        )
+    if not clear and not stats:
+        console.print("Use --clear or --stats. See: coderev cache --help")
+
+
+@app.command()
 def version() -> None:
     """Show version information."""
     console.print(f"CodeRev version {__version__}")
-    console.print("AI-powered code review using Anthropic Claude")
+    console.print("AI-powered code review using Groq (Kimi K2)")
 
 
 # Entry point for direct execution

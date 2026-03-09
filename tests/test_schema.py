@@ -138,20 +138,20 @@ class TestReviewMetadata:
     def test_valid_metadata(self):
         """Test creating valid metadata."""
         meta = ReviewMetadata(
-            model="kimi-k2-0528",
+            model="moonshotai/kimi-k2-instruct",
             total_tokens=18432,
             processing_time_seconds=12.4,
             diff_lines=1847,
             files_reviewed=3,
         )
-        assert meta.model == "kimi-k2-0528"
+        assert meta.model == "moonshotai/kimi-k2-instruct"
         assert meta.total_tokens == 18432
     
     def test_negative_tokens_invalid(self):
         """Test that token count can't be negative."""
         with pytest.raises(ValidationError):
             ReviewMetadata(
-                model="kimi-k2-0528",
+                model="moonshotai/kimi-k2-instruct",
                 total_tokens=-100,
                 processing_time_seconds=1.0,
                 diff_lines=100,
@@ -166,7 +166,7 @@ class TestCodeReviewResult:
     def sample_metadata(self):
         """Create sample metadata for tests."""
         return ReviewMetadata(
-            model="kimi-k2-0528",
+            model="moonshotai/kimi-k2-instruct",
             total_tokens=10000,
             processing_time_seconds=5.0,
             diff_lines=500,
@@ -338,7 +338,7 @@ class TestJsonSerialization:
         """Test that full CodeReviewResult can be serialized and deserialized."""
         result = CodeReviewResult(
             metadata=ReviewMetadata(
-                model="kimi-k2-0528",
+                model="moonshotai/kimi-k2-instruct",
                 total_tokens=5000,
                 processing_time_seconds=3.5,
                 diff_lines=200,

@@ -1,0 +1,246 @@
+name: CodeRev AI Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+  security-events: write
+
+jobs:
+  review:
+    name: AI Code Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate diff
+        id: diff
+        run: |
+          git diff origin/${{ github.base_ref }}...HEAD > pr.patch
+          git diff origin/${{ github.base_ref }}...HEAD --name-only > changed_files.txt
+          DIFF_SIZE=$(wc -c < pr.patch)
+          echo "diff_size=${DIFF_SIZE}" >> $GITHUB_OUTPUT
+          echo "Diff size: ${DIFF_SIZE} bytes"
+
+      - name: Check if diff is empty
+        id: check
+        run: |
+          if [ ! -s pr.patch ]; then
+            echo "empty=true" >> $GITHUB_OUTPUT
+          else
+            echo "empty=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set review mode based on diff size
+        if: steps.check.outputs.empty == 'false'
+        run: |
+          DIFF_SIZE=${{ steps.diff.outputs.diff_size }}
+          if [ "$DIFF_SIZE" -gt "500000" ]; then
+            echo "REVIEW_MODE=summary" >> $GITHUB_ENV
+            echo "Warning: Large diff (${DIFF_SIZE} bytes) - running in summary mode"
+          else
+            echo "REVIEW_MODE=full" >> $GITHUB_ENV
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install CodeRev
+        run: pip install -e .
+
+      - name: Run AI Code Review
+        if: steps.check.outputs.empty == 'false'
+        id: review
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          coderev review \
+            --diff pr.patch \
+            --format json \
+            --output review_result.json \
+            --no-cache \
+            --fail-on critical
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Generate SARIF output
+        if: steps.check.outputs.empty == 'false'
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          coderev review \
+            --diff pr.patch \
+            --format sarif \
+            --output review_result.sarif \
+            --no-cache
+
+      - name: Validate SARIF before upload
+        if: steps.check.outputs.empty == 'false'
+        run: |
+          python -c "
+import json
+with open('review_result.sarif') as f:
+    doc = json.load(f)
+assert doc['version'] == '2.1.0', f'Wrong SARIF version: {doc[\"version\"]}'
+results_count = sum(len(r.get('results', [])) for r in doc['runs'])
+print(f'Valid SARIF: {results_count} result(s)')
+"
+
+      - name: Upload SARIF to GitHub Code Scanning
+        if: steps.check.outputs.empty == 'false'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: review_result.sarif
+          category: coderev-ai-review
+        continue-on-error: true
+
+      - name: Post inline PR review comments
+        if: steps.check.outputs.empty == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python .github/scripts/post_review_comments.py \
+            --result review_result.json \
+            --pr $PR_NUMBER \
+            --repo $REPO \
+            --sha $HEAD_SHA
+
+      - name: Post summary comment
+        if: steps.check.outputs.empty == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            let result;
+            try {
+              result = JSON.parse(fs.readFileSync('review_result.json', 'utf8'));
+            } catch (e) {
+              console.log('No review result found');
+              return;
+            }
+
+            const findings = result.findings || [];
+            const counts = {
+              critical: findings.filter(f => f.severity === 'critical').length,
+              high:     findings.filter(f => f.severity === 'high').length,
+              medium:   findings.filter(f => f.severity === 'medium').length,
+              low:      findings.filter(f => f.severity === 'low').length,
+            };
+
+            const riskEmoji = {
+              critical: '🔴', high: '🟡', medium: '🟠', low: '🔵', info: '⚪'
+            };
+
+            const badge = riskEmoji[result.overall_risk] || '⚪';
+            const totalFindings = findings.length;
+
+            const rows = findings
+              .filter(f => ['critical', 'high'].includes(f.severity))
+              .slice(0, 10)
+              .map(f => `| ${riskEmoji[f.severity]} ${f.severity.toUpperCase()} | \`${f.file_path}\` L${f.line_range?.start || '?'} | ${f.title} |`)
+              .join('\n');
+
+            const body = [
+              `<!-- coderev-summary -->`,
+              `## ${badge} CodeRev AI Review — ${result.overall_risk?.toUpperCase()} Risk`,
+              ``,
+              `> ${result.summary}`,
+              ``,
+              `### Findings Summary`,
+              `| Severity | Count |`,
+              `|----------|-------|`,
+              `| 🔴 Critical | ${counts.critical} |`,
+              `| 🟡 High | ${counts.high} |`,
+              `| 🟠 Medium | ${counts.medium} |`,
+              `| 🔵 Low | ${counts.low} |`,
+              ``,
+              totalFindings > 0 ? [
+                `### Top Issues`,
+                `| Severity | Location | Issue |`,
+                `|----------|----------|-------|`,
+                rows,
+                counts.critical + counts.high > 10 ? `\n_...and ${counts.critical + counts.high - 10} more. See inline comments._` : '',
+              ].join('\n') : `✅ No significant issues found.`,
+              ``,
+              result.praise?.length > 0 ? [
+                `### ✨ What's Done Well`,
+                ...result.praise.map(p => `- ${p}`),
+              ].join('\n') : '',
+              ``,
+              `---`,
+              `_Model: \`${result.metadata?.model}\` · ${result.metadata?.total_tokens?.toLocaleString()} tokens · ${result.metadata?.processing_time_seconds}s_`,
+            ].filter(Boolean).join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            for (const c of comments) {
+              if (c.body?.includes('<!-- coderev-summary -->')) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: c.id,
+                });
+              }
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      - name: Set commit status
+        if: always() && steps.check.outputs.empty == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let hasCritical = false;
+            let description = 'CodeRev: No issues found';
+
+            try {
+              const result = JSON.parse(fs.readFileSync('review_result.json', 'utf8'));
+              const critical = (result.findings || []).filter(f => f.severity === 'critical');
+              hasCritical = critical.length > 0;
+              const total = (result.findings || []).length;
+              description = hasCritical
+                ? `CodeRev: ${critical.length} critical issue(s) — merge blocked`
+                : `CodeRev: ${total} finding(s) — no critical issues`;
+            } catch (e) {
+              description = 'CodeRev: Review completed';
+            }
+
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state: hasCritical ? 'failure' : 'success',
+              description,
+              context: 'coderev/ai-review',
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/security/code-scanning`,
+            });
+
+      - name: Write job summary
+        if: always() && steps.check.outputs.empty == 'false'
+        run: python .github/scripts/write_job_summary.py review_result.json

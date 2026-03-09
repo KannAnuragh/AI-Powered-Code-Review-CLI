@@ -78,3 +78,39 @@ def log_sensitive_data(user_data):
     """Log user data - LOGS SENSITIVE INFORMATION."""
     # Logging potentially sensitive user data
     print(f"User data: {user_data}")
+
+
+# ── Performance anti-patterns ─────────────────────────────────────────
+
+
+def get_users_with_posts(user_ids):
+    """N+1 query pattern — should batch fetch."""
+    results = []
+    conn = sqlite3.connect("users.db")
+    for user_id in user_ids:                          # N+1: one query per user
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT * FROM users WHERE id = {user_id}")
+        user = cursor.fetchone()
+        cursor.execute(f"SELECT * FROM posts WHERE user_id = {user_id}")
+        posts = cursor.fetchall()
+        results.append({"user": user, "posts": posts})
+    return results
+
+
+def find_duplicate_emails(email_list):
+    """O(n²) duplicate detection — should use a set."""
+    duplicates = []
+    for i in range(len(email_list)):
+        for j in range(len(email_list)):              # O(n²) nested loop
+            if i != j and email_list[i] == email_list[j]:
+                if email_list[i] not in duplicates:
+                    duplicates.append(email_list[i])
+    return duplicates
+
+
+def build_report(records):
+    """String concatenation in loop — should use join()."""
+    report = ""
+    for record in records:                            # O(n) string copies
+        report += f"Record: {record}\n"
+    return report
