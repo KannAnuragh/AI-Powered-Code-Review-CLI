@@ -1,0 +1,23 @@
+{
+  "id": "security/path_traversal",
+  "description": "Path traversal via direct concatenation and unsafe os.path.join",
+  "file_name": "path_traversal.py",
+  "expected_findings": [
+    {
+      "category": "security",
+      "severity": "critical",
+      "title_keywords": ["path", "traversal", "directory"],
+      "line_range_approximate": {"start": 9, "end": 13},
+      "references_must_include": ["CWE-22"]
+    },
+    {
+      "category": "security",
+      "severity": "critical",
+      "title_keywords": ["path", "traversal", "join"],
+      "line_range_approximate": {"start": 18, "end": 21},
+      "references_must_include": ["CWE-22"]
+    }
+  ],
+  "expected_categories": ["security"],
+  "false_positive_check": false
+}

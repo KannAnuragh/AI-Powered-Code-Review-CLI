@@ -6,7 +6,12 @@ from pydantic import ValidationError
 from coderev.schema import (
     Category,
     CodeReviewResult,
+    EvalResult,
+    EvalSummary,
+    ExpectedFinding,
     Finding,
+    FindingMatch,
+    GoldenSample,
     LineRange,
     ReviewMetadata,
     Severity,
@@ -365,3 +370,261 @@ class TestJsonSerialization:
         assert restored.summary == result.summary
         assert len(restored.findings) == 1
         assert restored.findings[0].title == "Off-by-one error"
+
+
+class TestExpectedFinding:
+    """Tests for ExpectedFinding model."""
+
+    def test_minimal_expected_finding(self):
+        ef = ExpectedFinding(
+            category=Category.SECURITY,
+            severity=Severity.CRITICAL,
+            title_keywords=["SQL", "injection"],
+        )
+        assert ef.category == Category.SECURITY
+        assert ef.references_must_include == []
+        assert ef.line_range_approximate is None
+        assert ef.severity_minimum is None
+
+    def test_full_expected_finding(self):
+        ef = ExpectedFinding(
+            category=Category.SECURITY,
+            severity=Severity.CRITICAL,
+            title_keywords=["SQL", "injection"],
+            line_range_approximate=LineRange(start=10, end=15),
+            references_must_include=["CWE-89"],
+            severity_minimum=Severity.HIGH,
+        )
+        assert ef.line_range_approximate.start == 10
+        assert ef.references_must_include == ["CWE-89"]
+        assert ef.severity_minimum == Severity.HIGH
+
+
+class TestGoldenSample:
+    """Tests for GoldenSample model."""
+
+    def test_valid_golden_sample(self):
+        gs = GoldenSample(
+            id="security/sql_injection",
+            description="SQL injection test",
+            file_name="sql_injection.py",
+            source_code="import sqlite3\n",
+            expected_findings=[
+                ExpectedFinding(
+                    category=Category.SECURITY,
+                    severity=Severity.CRITICAL,
+                    title_keywords=["SQL"],
+                )
+            ],
+            expected_categories=[Category.SECURITY],
+        )
+        assert gs.id == "security/sql_injection"
+        assert gs.false_positive_check is False
+        assert len(gs.expected_findings) == 1
+
+    def test_false_positive_sample(self):
+        gs = GoldenSample(
+            id="clean/auth",
+            description="Clean auth code",
+            file_name="clean_auth.py",
+            source_code="import secrets\n",
+            expected_findings=[],
+            expected_categories=[],
+            false_positive_check=True,
+        )
+        assert gs.false_positive_check is True
+        assert gs.expected_findings == []
+
+
+class TestFindingMatch:
+    """Tests for FindingMatch model."""
+
+    def test_unmatched_finding(self):
+        fm = FindingMatch(
+            expected=ExpectedFinding(
+                category=Category.SECURITY,
+                severity=Severity.CRITICAL,
+                title_keywords=["SQL"],
+            ),
+        )
+        assert fm.is_match is False
+        assert fm.matched is None
+        assert fm.confidence_score == 0.0
+
+    def test_matched_finding(self):
+        finding = Finding(
+            category=Category.SECURITY,
+            severity=Severity.CRITICAL,
+            file_path="test.py",
+            title="SQL Injection found",
+            description="desc",
+            confidence=0.95,
+        )
+        fm = FindingMatch(
+            expected=ExpectedFinding(
+                category=Category.SECURITY,
+                severity=Severity.CRITICAL,
+                title_keywords=["SQL"],
+            ),
+            matched=finding,
+            is_match=True,
+            severity_correct=True,
+            line_accurate=True,
+            confidence_score=0.95,
+        )
+        assert fm.is_match is True
+        assert fm.matched.title == "SQL Injection found"
+
+
+class TestEvalResult:
+    """Tests for EvalResult model."""
+
+    def test_valid_eval_result(self):
+        er = EvalResult(
+            sample_id="security/sql_injection",
+            timestamp="2026-03-09T00:00:00Z",
+            model="moonshotai/kimi-k2-instruct",
+            pipeline_version="0.4.0",
+            recall=1.0,
+            precision=0.8,
+            severity_accuracy=1.0,
+            line_accuracy=0.5,
+            expected_count=2,
+            found_count=2,
+            actual_count=3,
+            false_positive_count=1,
+            matches=[],
+            tokens_used=5000,
+            cost_usd=0.01,
+            processing_time_seconds=3.5,
+        )
+        assert er.recall == 1.0
+        assert er.false_positive_count == 1
+
+    def test_eval_result_json_roundtrip(self):
+        er = EvalResult(
+            sample_id="test",
+            timestamp="2026-03-09T00:00:00Z",
+            model="test-model",
+            pipeline_version="0.4.0",
+            recall=0.75,
+            precision=0.6,
+            severity_accuracy=0.5,
+            line_accuracy=0.5,
+            expected_count=4,
+            found_count=3,
+            actual_count=5,
+            false_positive_count=2,
+            matches=[],
+            tokens_used=1000,
+            cost_usd=0.001,
+            processing_time_seconds=1.0,
+        )
+        json_str = er.model_dump_json()
+        restored = EvalResult.model_validate_json(json_str)
+        assert restored.sample_id == "test"
+        assert restored.recall == 0.75
+
+
+class TestEvalSummary:
+    """Tests for EvalSummary model."""
+
+    def test_passing_summary(self):
+        es = EvalSummary(
+            run_id="abc123",
+            timestamp="2026-03-09T00:00:00Z",
+            model="moonshotai/kimi-k2-instruct",
+            pipeline_version="0.4.0",
+            total_samples=5,
+            samples_passed=5,
+            samples_failed=[],
+            avg_recall=0.90,
+            avg_precision=0.85,
+            avg_severity_accuracy=0.80,
+            avg_line_accuracy=0.75,
+            avg_tokens_per_sample=5000.0,
+            avg_cost_per_sample=0.01,
+            total_cost_usd=0.05,
+        )
+        assert es.passed is True
+
+    def test_failing_summary_low_recall(self):
+        es = EvalSummary(
+            run_id="abc123",
+            timestamp="2026-03-09T00:00:00Z",
+            model="test",
+            pipeline_version="0.4.0",
+            total_samples=5,
+            samples_passed=2,
+            samples_failed=["s1", "s2", "s3"],
+            avg_recall=0.50,
+            avg_precision=0.85,
+            avg_severity_accuracy=0.80,
+            avg_line_accuracy=0.75,
+            avg_tokens_per_sample=5000.0,
+            avg_cost_per_sample=0.01,
+            total_cost_usd=0.05,
+        )
+        assert es.passed is False
+
+    def test_failing_summary_low_precision(self):
+        es = EvalSummary(
+            run_id="abc123",
+            timestamp="2026-03-09T00:00:00Z",
+            model="test",
+            pipeline_version="0.4.0",
+            total_samples=3,
+            samples_passed=3,
+            samples_failed=[],
+            avg_recall=0.90,
+            avg_precision=0.50,
+            avg_severity_accuracy=0.80,
+            avg_line_accuracy=0.75,
+            avg_tokens_per_sample=5000.0,
+            avg_cost_per_sample=0.01,
+            total_cost_usd=0.03,
+        )
+        assert es.passed is False
+
+    def test_custom_thresholds(self):
+        es = EvalSummary(
+            run_id="abc123",
+            timestamp="2026-03-09T00:00:00Z",
+            model="test",
+            pipeline_version="0.4.0",
+            total_samples=1,
+            samples_passed=1,
+            samples_failed=[],
+            avg_recall=0.60,
+            avg_precision=0.50,
+            avg_severity_accuracy=0.50,
+            avg_line_accuracy=0.50,
+            avg_tokens_per_sample=1000.0,
+            avg_cost_per_sample=0.001,
+            total_cost_usd=0.001,
+            recall_threshold=0.50,
+            precision_threshold=0.40,
+        )
+        assert es.passed is True
+
+    def test_summary_json_roundtrip(self):
+        es = EvalSummary(
+            run_id="xyz",
+            timestamp="2026-03-09T00:00:00Z",
+            model="test",
+            pipeline_version="0.4.0",
+            total_samples=2,
+            samples_passed=1,
+            samples_failed=["s1"],
+            avg_recall=0.85,
+            avg_precision=0.75,
+            avg_severity_accuracy=0.90,
+            avg_line_accuracy=0.80,
+            avg_tokens_per_sample=3000.0,
+            avg_cost_per_sample=0.005,
+            total_cost_usd=0.01,
+        )
+        json_str = es.model_dump_json()
+        restored = EvalSummary.model_validate_json(json_str)
+        assert restored.run_id == "xyz"
+        assert restored.passed is True

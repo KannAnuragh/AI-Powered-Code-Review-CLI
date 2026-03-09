@@ -48,4 +48,7 @@ review_stderr.txt
 *.patch
 pr.patch
 merge.patch
+
+# Eval results (runtime artifacts)
+results/
 weekly.patch

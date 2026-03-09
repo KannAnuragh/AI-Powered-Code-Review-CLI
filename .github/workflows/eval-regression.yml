@@ -1,0 +1,91 @@
+name: CodeRev Eval Regression
+
+on:
+  push:
+    paths:
+      - "coderev/agents/*.py"
+      - "coderev/agent.py"
+      - "coderev/pipeline.py"
+      - "tests/golden/**"
+      - "pyproject.toml"
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  eval-regression:
+    name: Eval Regression Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install CodeRev
+        run: pip install -e .
+
+      - name: Verify GROQ_API_KEY is set
+        run: |
+          if [ -z "${{ secrets.GROQ_API_KEY }}" ]; then
+            echo "GROQ_API_KEY not configured — skipping eval"
+            exit 0
+          fi
+
+      - name: Run eval suite
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          coderev eval --threshold 0.80 --fail
+
+      - name: Upload eval results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-${{ github.run_id }}
+          path: results/eval_history.json
+          retention-days: 90
+
+      - name: Write eval summary
+        if: always()
+        run: |
+          python - <<'EOF'
+          import json, os
+          from pathlib import Path
+
+          history_path = Path("results/eval_history.json")
+          if not history_path.exists():
+              print("No eval results")
+              exit(0)
+
+          history = json.loads(history_path.read_text())
+          if not history:
+              exit(0)
+
+          latest = history[-1]["summary"]
+
+          summary = f"""## CodeRev Eval Regression Results
+
+          **Run ID:** {latest['run_id']}
+          **Model:** {latest['model']}
+          **Pipeline Version:** {latest['pipeline_version']}
+
+          | Metric | Score | Threshold | Status |
+          |--------|-------|-----------|--------|
+          | Recall | {latest['avg_recall']:.0%} | 80% | {'PASS' if latest['avg_recall'] >= 0.8 else 'FAIL'} |
+          | Precision | {latest['avg_precision']:.0%} | 70% | {'PASS' if latest['avg_precision'] >= 0.7 else 'FAIL'} |
+          | Severity Accuracy | {latest['avg_severity_accuracy']:.0%} | — | — |
+          | Line Accuracy | {latest['avg_line_accuracy']:.0%} | — | — |
+
+          **Samples:** {latest['samples_passed']}/{latest['total_samples']} passed
+          **Total Cost:** ${latest['total_cost_usd']:.4f}
+          """
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(summary)
+          EOF

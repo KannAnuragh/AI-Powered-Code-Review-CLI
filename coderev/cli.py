@@ -324,6 +324,172 @@ def version() -> None:
     console.print("AI-powered code review using Groq (Kimi K2)")
 
 
+@app.command(name="eval")
+def eval_cmd(
+    category: Annotated[
+        Optional[str],
+        typer.Option(
+            "--category", "-c",
+            help="Run only samples in this category: security|correctness|performance",
+        ),
+    ] = None,
+    threshold: Annotated[
+        float,
+        typer.Option("--threshold", help="Recall threshold to pass (0.0-1.0)"),
+    ] = 0.80,
+    list_samples: Annotated[
+        bool,
+        typer.Option("--list", help="List available golden samples without running"),
+    ] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose/--quiet"),
+    ] = True,
+    fail_on_regression: Annotated[
+        bool,
+        typer.Option("--fail/--no-fail", help="Exit code 1 if recall drops below threshold"),
+    ] = True,
+) -> None:
+    """Run the evaluation suite against golden test samples.
+
+    Measures recall, precision, severity accuracy, and line accuracy.
+    Results are saved to results/eval_history.json.
+
+    Examples:
+        coderev eval                      # run all samples
+        coderev eval --category security  # run only security samples
+        coderev eval --list               # show available samples
+    """
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        console.print("[red]Error:[/red] GROQ_API_KEY not set", err=True)
+        raise typer.Exit(1)
+
+    from .eval import EvalRunner
+
+    if list_samples:
+        runner = EvalRunner(api_key=api_key)
+        samples = runner._load_golden_samples()
+        console.print(f"\nAvailable golden samples ({len(samples)} total):\n")
+        for s in samples:
+            fp_note = " [false positive check]" if s.false_positive_check else ""
+            console.print(f"  {s.id}{fp_note}")
+            console.print(f"    {s.description}")
+            console.print(f"    Expected: {len(s.expected_findings)} finding(s)")
+        return
+
+    categories = [category] if category else None
+
+    console.print(f"\n[bold]CodeRev Eval[/bold] — Running against golden samples\n")
+
+    runner = EvalRunner(
+        api_key=api_key,
+        recall_threshold=threshold,
+        precision_threshold=0.70,
+    )
+
+    try:
+        summary = runner.run_all(categories=categories, verbose=verbose)
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}", err=True)
+        raise typer.Exit(1)
+
+    console.print(f"\n{'─' * 60}")
+    console.print(f"  Eval Summary — {summary.run_id}")
+    console.print(f"{'─' * 60}")
+    console.print(f"  Samples:    {summary.samples_passed}/{summary.total_samples} passed")
+    console.print(f"  Recall:     {summary.avg_recall:.0%}  (threshold: {threshold:.0%})")
+    console.print(f"  Precision:  {summary.avg_precision:.0%}")
+    console.print(f"  Sev. Acc:   {summary.avg_severity_accuracy:.0%}")
+    console.print(f"  Line Acc:   {summary.avg_line_accuracy:.0%}")
+    console.print(f"  Cost:       ${summary.total_cost_usd:.4f} total")
+    console.print(f"{'─' * 60}")
+
+    if summary.samples_failed:
+        console.print(f"\n  [red]Failed samples:[/red]")
+        for sid in summary.samples_failed:
+            console.print(f"     - {sid}")
+
+    verdict = "[green]PASS[/green]" if summary.passed else "[red]FAIL[/red]"
+    console.print(f"\n  {verdict}\n")
+    console.print(f"  Results saved to: results/eval_history.json\n")
+
+    if fail_on_regression and not summary.passed:
+        raise typer.Exit(1)
+
+
+@app.command()
+def compare(
+    diff: Annotated[
+        Path,
+        typer.Option("--diff", help="Diff file to compare reviews on", exists=True),
+    ],
+    runs: Annotated[
+        int,
+        typer.Option("--runs", help="Number of comparison runs (more = more reliable)"),
+    ] = 3,
+    output: Annotated[
+        Optional[Path],
+        typer.Option("--output", "-o", help="Save comparison result JSON to file"),
+    ] = None,
+) -> None:
+    """Compare two review variants using LLM-as-judge.
+
+    Runs the same diff through two variants of the pipeline and asks
+    the judge which produces better findings.
+
+    Examples:
+        coderev compare --diff pr.patch --runs 5
+    """
+    import json as json_mod
+
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        console.print("[red]Error:[/red] GROQ_API_KEY not set", err=True)
+        raise typer.Exit(1)
+
+    diff_content = diff.read_text()
+
+    console.print(f"\n[bold]CodeRev Compare[/bold] — LLM-as-Judge A/B Test\n")
+    console.print(f"  Diff: {diff} ({len(diff_content.splitlines())} lines)")
+    console.print(f"  Runs: {runs}\n")
+
+    from .judge import LLMJudge
+
+    pipeline_a = ReviewPipeline(api_key=api_key, use_cache=False)
+    pipeline_b = ReviewPipeline(api_key=api_key, use_cache=False)
+
+    reviews_a = []
+    reviews_b = []
+
+    for i in range(runs):
+        console.print(f"  Run {i+1}/{runs}...", end="")
+        ra = pipeline_a.run(diff_content, [str(diff)])
+        rb = pipeline_b.run(diff_content, [str(diff)])
+        reviews_a.append(ra.model_dump())
+        reviews_b.append(rb.model_dump())
+        console.print(" done")
+
+    judge = LLMJudge(api_key=api_key)
+    tournament = judge.run_tournament(
+        diffs=[diff_content] * runs,
+        reviews_a=reviews_a,
+        reviews_b=reviews_b,
+        label_a="Variant A (current)",
+        label_b="Variant B (new)",
+    )
+
+    console.print(f"\n  Results:")
+    console.print(f"  Variant A wins: {tournament.get('Variant A (current)_wins', 0)}/{runs}")
+    console.print(f"  Variant B wins: {tournament.get('Variant B (new)_wins', 0)}/{runs}")
+    console.print(f"  Ties:           {tournament.get('ties', 0)}/{runs}")
+    console.print(f"\n  Recommendation: {tournament.get('recommendation', '')}\n")
+
+    if output:
+        output.write_text(json_mod.dumps(tournament, indent=2))
+        console.print(f"  Saved to: {output}\n")
+
+
 # Entry point for direct execution
 if __name__ == "__main__":
     app()

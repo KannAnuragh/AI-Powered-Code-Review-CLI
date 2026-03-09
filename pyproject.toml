@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "coderev"
-version = "0.3.0"
+version = "0.4.0"
 description = "AI-powered code review CLI using Groq (Kimi K2) with GitHub Actions CI integration"
 readme = "README.md"
 requires-python = ">=3.11"

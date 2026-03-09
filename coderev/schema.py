@@ -8,7 +8,7 @@ from enum import Enum
 from typing import Optional
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class Severity(str, Enum):
@@ -153,3 +153,89 @@ class CodeReviewResult(BaseModel):
         for finding in self.findings:
             counts[finding.severity] += 1
         return counts
+
+
+# ── Eval System Models ────────────────────────────────────────────────
+
+
+class ExpectedFinding(BaseModel):
+    """Describes a finding that MUST be present in a review of a golden sample."""
+    category: Category
+    severity: Severity
+    title_keywords: list[str]
+    line_range_approximate: Optional[LineRange] = None
+    references_must_include: list[str] = []
+    severity_minimum: Optional[Severity] = None
+
+
+class GoldenSample(BaseModel):
+    """A curated test case with known vulnerabilities and expected findings."""
+    id: str
+    description: str
+    file_name: str
+    source_code: str
+    expected_findings: list[ExpectedFinding]
+    expected_categories: list[Category]
+    false_positive_check: bool = False
+
+
+class FindingMatch(BaseModel):
+    """Result of matching one expected finding against actual pipeline output."""
+    expected: ExpectedFinding
+    matched: Optional[Finding] = None
+    is_match: bool = False
+    severity_correct: bool = False
+    line_accurate: bool = False
+    confidence_score: float = 0.0
+
+
+class EvalResult(BaseModel):
+    """Full evaluation result for one golden sample."""
+    sample_id: str
+    timestamp: str
+    model: str
+    pipeline_version: str
+
+    recall: float
+    precision: float
+    severity_accuracy: float
+    line_accuracy: float
+
+    expected_count: int
+    found_count: int
+    actual_count: int
+    false_positive_count: int
+
+    matches: list[FindingMatch]
+
+    tokens_used: int
+    cost_usd: float
+    processing_time_seconds: float
+
+
+class EvalSummary(BaseModel):
+    """Aggregate metrics across all golden samples in one eval run."""
+    run_id: str
+    timestamp: str
+    model: str
+    pipeline_version: str
+    total_samples: int
+    samples_passed: int
+    samples_failed: list[str]
+
+    avg_recall: float
+    avg_precision: float
+    avg_severity_accuracy: float
+    avg_line_accuracy: float
+    avg_tokens_per_sample: float
+    avg_cost_per_sample: float
+    total_cost_usd: float
+
+    recall_threshold: float = 0.80
+    precision_threshold: float = 0.70
+
+    @computed_field
+    @property
+    def passed(self) -> bool:
+        return (self.avg_recall >= self.recall_threshold and
+                self.avg_precision >= self.precision_threshold)

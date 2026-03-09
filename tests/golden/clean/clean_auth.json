@@ -1,0 +1,8 @@
+{
+  "id": "clean/auth",
+  "description": "Well-written authentication code — expects zero critical/high findings",
+  "file_name": "clean_auth.py",
+  "expected_findings": [],
+  "expected_categories": [],
+  "false_positive_check": true
+}
