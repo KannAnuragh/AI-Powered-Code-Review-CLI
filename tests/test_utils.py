@@ -10,6 +10,7 @@ from coderev.utils import (
     extract_files_from_diff,
     format_cost,
     get_severity_exit_code,
+    read_diff_from_stdin,
 )
 from coderev.schema import Finding, Category, Severity
 
@@ -307,3 +308,31 @@ class TestDiffPositionMap:
         assert ("old_name.py", 1) in pos_map
         # Both resolve to the same diff position
         assert pos_map[("new_name.py", 2)] == pos_map[("old_name.py", 2)]
+
+
+class TestReadDiffFromStdin:
+    """Tests for reading diff content from stdin."""
+
+    def test_returns_content_when_piped(self, monkeypatch):
+        """When stdin is not a TTY, read and return its content."""
+        import io
+        fake_stdin = io.StringIO("diff --git a/f.py b/f.py\n")
+        fake_stdin.isatty = lambda: False
+        monkeypatch.setattr("coderev.utils.sys.stdin", fake_stdin)
+        assert read_diff_from_stdin() == "diff --git a/f.py b/f.py\n"
+
+    def test_returns_none_when_tty(self, monkeypatch):
+        """When stdin is a TTY (interactive), return None."""
+        import io
+        fake_stdin = io.StringIO()
+        fake_stdin.isatty = lambda: True
+        monkeypatch.setattr("coderev.utils.sys.stdin", fake_stdin)
+        assert read_diff_from_stdin() is None
+
+    def test_returns_empty_string_for_empty_pipe(self, monkeypatch):
+        """An empty pipe should return an empty string, not None."""
+        import io
+        fake_stdin = io.StringIO("")
+        fake_stdin.isatty = lambda: False
+        monkeypatch.setattr("coderev.utils.sys.stdin", fake_stdin)
+        assert read_diff_from_stdin() == ""

@@ -34,8 +34,8 @@ exit code reflects the worst severity found.
 
 ```bash
 # Clone and install
-git clone https://github.com/your-username/coderev.git
-cd coderev
+git clone https://github.com/KannAnuragh/AI-Powered-Code-Review-CLI.git
+cd AI-Powered-Code-Review-CLI/coderev
 pip install -e ".[dev]"
 
 # Set your Groq API key
@@ -204,6 +204,15 @@ pytest --cov=coderev
 mypy coderev/
 ```
 
+### Demo Files
+
+The repo includes `sample_bad.py` (intentionally vulnerable code) and
+`sample.patch` / `sample_new.patch` (pre-built diffs) for local testing:
+
+```bash
+coderev review --diff sample.patch
+```
+
 ## Severity Levels
 
 | Level | Emoji | Description |
@@ -214,6 +223,3 @@ mypy coderev/
 | LOW | 🔵 | Minor improvement opportunity |
 | INFO | ⚪ | Style or best practice note |
 
-## License
-
-MIT License — see LICENSE for details.
