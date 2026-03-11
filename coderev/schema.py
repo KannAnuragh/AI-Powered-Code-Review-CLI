@@ -5,10 +5,10 @@ All agents must conform to these schemas.
 """
 
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 import uuid
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, computed_field, field_validator
 
 
 class Severity(str, Enum):
@@ -239,3 +239,74 @@ class EvalSummary(BaseModel):
     def passed(self) -> bool:
         return (self.avg_recall >= self.recall_threshold and
                 self.avg_precision >= self.precision_threshold)
+
+
+# ── Config Models ─────────────────────────────────────────────────────
+
+
+class ReviewConfig(BaseModel):
+    """[review] section of .coderev.toml"""
+    fail_on: Optional[Severity] = None
+    min_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    format: Literal["rich", "json", "markdown", "sarif"] = "rich"
+    model: str = "moonshotai/kimi-k2-instruct"
+    no_cache: bool = False
+    max_diff_lines: int = Field(default=5000, ge=100)
+
+    @field_validator("fail_on", mode="before")
+    @classmethod
+    def parse_fail_on(cls, v):
+        if v is None or v == "none":
+            return None
+        return Severity(v)
+
+
+class AgentsConfig(BaseModel):
+    """[agents] section of .coderev.toml"""
+    enabled: list[Literal[
+        "security", "performance", "correctness"
+    ]] = ["security", "performance", "correctness"]
+
+
+class ExcludeConfig(BaseModel):
+    """[exclude] section of .coderev.toml"""
+    paths: list[str] = []
+    categories: list[Category] = []
+    severities: list[Severity] = []
+
+
+class EvalConfig(BaseModel):
+    """[eval] section of .coderev.toml"""
+    recall_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
+    precision_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
+
+
+class CodeRevConfig(BaseModel):
+    """
+    Full .coderev.toml configuration.
+    All fields are optional — missing fields fall back to built-in defaults.
+    """
+    review: ReviewConfig = Field(default_factory=ReviewConfig)
+    agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    exclude: ExcludeConfig = Field(default_factory=ExcludeConfig)
+    eval: EvalConfig = Field(default_factory=EvalConfig)
+
+    @classmethod
+    def default(cls) -> "CodeRevConfig":
+        """Return a config with all built-in defaults."""
+        return cls()
+
+
+# ── Explain Models ────────────────────────────────────────────────────
+
+
+class ExplainResult(BaseModel):
+    """Expanded explanation of a single finding."""
+    finding_id: str
+    finding: Finding
+    what_is_this: str
+    why_vulnerable: str
+    how_to_fix: str
+    real_world_examples: list[str] = []
+    references: list[str]
+    generated_at: str

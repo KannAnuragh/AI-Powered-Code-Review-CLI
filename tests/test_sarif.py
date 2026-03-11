@@ -45,7 +45,7 @@ class TestSARIFStructure:
         doc = to_sarif(_make_result())
         driver = doc["runs"][0]["tool"]["driver"]
         assert driver["name"] == "CodeRev"
-        assert driver["version"] == "0.4.0"
+        assert driver["version"] == "0.5.0"
 
     def test_model_not_in_driver_name(self):
         """Model name must NOT appear in tool.driver.name — breaks GitHub."""

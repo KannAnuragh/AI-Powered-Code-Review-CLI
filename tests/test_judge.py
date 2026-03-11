@@ -117,7 +117,7 @@ class TestTournament:
         )
 
         assert result["total_comparisons"] == 3
-        assert result["Current_wins"] == 2
+        assert result["current_wins"] == 2
         assert result["ties"] == 1
 
     def test_tournament_recommendation_when_clear_winner(self):

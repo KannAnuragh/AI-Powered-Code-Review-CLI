@@ -53,7 +53,7 @@ class EvalRunner:
         self.pipeline = ReviewPipeline(
             api_key=api_key,
             model=model,
-            use_cache=use_cache,
+            use_cache=False,  # ALWAYS False — eval must never use cached results
         )
         self.model = model
         self.golden_dir = golden_dir

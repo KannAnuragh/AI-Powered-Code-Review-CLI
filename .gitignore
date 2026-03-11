@@ -18,6 +18,7 @@ ENV/
 
 # Environment variables / secrets
 .env
+.coderev.toml.local
 
 # IDE
 .vscode/

@@ -4,15 +4,21 @@ import pytest
 from pydantic import ValidationError
 
 from coderev.schema import (
+    AgentsConfig,
     Category,
+    CodeRevConfig,
     CodeReviewResult,
+    EvalConfig,
     EvalResult,
     EvalSummary,
+    ExcludeConfig,
+    ExplainResult,
     ExpectedFinding,
     Finding,
     FindingMatch,
     GoldenSample,
     LineRange,
+    ReviewConfig,
     ReviewMetadata,
     Severity,
 )
@@ -628,3 +634,155 @@ class TestEvalSummary:
         restored = EvalSummary.model_validate_json(json_str)
         assert restored.run_id == "xyz"
         assert restored.passed is True
+
+
+# ── Config Model Tests ────────────────────────────────────────────────
+
+
+class TestReviewConfig:
+    """Tests for ReviewConfig model."""
+
+    def test_defaults(self):
+        rc = ReviewConfig()
+        assert rc.fail_on is None
+        assert rc.min_confidence == 0.0
+        assert rc.format == "rich"
+        assert rc.model == "moonshotai/kimi-k2-instruct"
+        assert rc.no_cache is False
+        assert rc.max_diff_lines == 5000
+
+    def test_fail_on_none_string(self):
+        rc = ReviewConfig(fail_on="none")
+        assert rc.fail_on is None
+
+    def test_fail_on_severity(self):
+        rc = ReviewConfig(fail_on="high")
+        assert rc.fail_on == Severity.HIGH
+
+    def test_invalid_confidence_rejected(self):
+        with pytest.raises(ValidationError):
+            ReviewConfig(min_confidence=1.5)
+
+    def test_max_diff_lines_minimum(self):
+        with pytest.raises(ValidationError):
+            ReviewConfig(max_diff_lines=50)
+
+
+class TestAgentsConfig:
+    """Tests for AgentsConfig model."""
+
+    def test_defaults(self):
+        ac = AgentsConfig()
+        assert ac.enabled == ["security", "performance", "correctness"]
+
+    def test_subset(self):
+        ac = AgentsConfig(enabled=["security"])
+        assert ac.enabled == ["security"]
+
+    def test_invalid_agent_rejected(self):
+        with pytest.raises(ValidationError):
+            AgentsConfig(enabled=["security", "unknown_agent"])
+
+
+class TestExcludeConfig:
+    """Tests for ExcludeConfig model."""
+
+    def test_defaults_empty(self):
+        ec = ExcludeConfig()
+        assert ec.paths == []
+        assert ec.categories == []
+        assert ec.severities == []
+
+    def test_with_values(self):
+        ec = ExcludeConfig(
+            paths=["vendor/"],
+            categories=[Category.STYLE],
+            severities=[Severity.INFO],
+        )
+        assert ec.paths == ["vendor/"]
+        assert ec.categories == [Category.STYLE]
+
+
+class TestEvalConfig:
+    """Tests for EvalConfig model."""
+
+    def test_defaults(self):
+        ec = EvalConfig()
+        assert ec.recall_threshold == 0.80
+        assert ec.precision_threshold == 0.70
+
+    def test_custom_thresholds(self):
+        ec = EvalConfig(recall_threshold=0.95, precision_threshold=0.90)
+        assert ec.recall_threshold == 0.95
+
+    def test_invalid_threshold_rejected(self):
+        with pytest.raises(ValidationError):
+            EvalConfig(recall_threshold=1.5)
+
+
+class TestCodeRevConfig:
+    """Tests for CodeRevConfig top-level model."""
+
+    def test_default_factory(self):
+        cfg = CodeRevConfig.default()
+        assert cfg.review.format == "rich"
+        assert cfg.agents.enabled == ["security", "performance", "correctness"]
+
+    def test_all_sections_present(self):
+        cfg = CodeRevConfig()
+        assert isinstance(cfg.review, ReviewConfig)
+        assert isinstance(cfg.agents, AgentsConfig)
+        assert isinstance(cfg.exclude, ExcludeConfig)
+        assert isinstance(cfg.eval, EvalConfig)
+
+
+class TestExplainResult:
+    """Tests for ExplainResult model."""
+
+    def test_valid_explain_result(self):
+        finding = Finding(
+            id="abc12345",
+            category=Category.SECURITY,
+            severity=Severity.HIGH,
+            file_path="test.py",
+            title="SQL Injection found",
+            description="desc",
+            confidence=0.9,
+        )
+        er = ExplainResult(
+            finding_id="abc12345",
+            finding=finding,
+            what_is_this="SQL injection explained",
+            why_vulnerable="User input concatenated",
+            how_to_fix="Use parameterized queries",
+            real_world_examples=["CVE-2019-12345"],
+            references=["CWE-89"],
+            generated_at="2026-01-01T00:00:00Z",
+        )
+        assert er.finding_id == "abc12345"
+        assert er.what_is_this == "SQL injection explained"
+        assert len(er.real_world_examples) == 1
+
+    def test_explain_result_json_roundtrip(self):
+        finding = Finding(
+            id="abc12345",
+            category=Category.SECURITY,
+            severity=Severity.HIGH,
+            file_path="test.py",
+            title="SQL Injection found",
+            description="desc",
+            confidence=0.9,
+        )
+        er = ExplainResult(
+            finding_id="abc12345",
+            finding=finding,
+            what_is_this="explained",
+            why_vulnerable="because",
+            how_to_fix="fix it",
+            references=["CWE-89"],
+            generated_at="2026-01-01T00:00:00Z",
+        )
+        json_str = er.model_dump_json()
+        restored = ExplainResult.model_validate_json(json_str)
+        assert restored.finding_id == "abc12345"
+        assert restored.finding.title == "SQL Injection found"

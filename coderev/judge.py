@@ -134,6 +134,11 @@ Evaluate both reviews and return your verdict as JSON."""
         if not verdicts:
             return {"error": "No verdicts produced"}
 
+        def _to_key(label: str) -> str:
+            """Normalize a label to a safe dict key: no spaces, no parens."""
+            import re
+            return re.sub(r'[^a-z0-9_]', '_', label.lower()).strip('_')
+
         wins_a = sum(1 for v in verdicts if v.winner == "A")
         wins_b = sum(1 for v in verdicts if v.winner == "B")
         ties = sum(1 for v in verdicts if v.winner == "tie")
@@ -149,13 +154,13 @@ Evaluate both reviews and return your verdict as JSON."""
 
         return {
             "total_comparisons": len(verdicts),
-            f"{label_a}_wins": wins_a,
-            f"{label_b}_wins": wins_b,
+            f"{_to_key(label_a)}_wins": wins_a,
+            f"{_to_key(label_b)}_wins": wins_b,
             "ties": ties,
-            f"{label_a}_win_rate": round(wins_a / len(verdicts), 3),
-            f"{label_b}_win_rate": round(wins_b / len(verdicts), 3),
-            f"avg_score_{label_a}": round(avg_score_a, 2),
-            f"avg_score_{label_b}": round(avg_score_b, 2),
+            f"{_to_key(label_a)}_win_rate": round(wins_a / len(verdicts), 3),
+            f"{_to_key(label_b)}_win_rate": round(wins_b / len(verdicts), 3),
+            f"avg_score_{_to_key(label_a)}": round(avg_score_a, 2),
+            f"avg_score_{_to_key(label_b)}": round(avg_score_b, 2),
             "recommendation": recommendation,
         }
 

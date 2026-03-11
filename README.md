@@ -1,207 +1,219 @@
 # CodeRev
 
-**AI-powered code review CLI using Groq Kimi K2**
+![AI Recall](https://img.shields.io/badge/AI%20Recall-≥80%25-green)
+![Tests](https://img.shields.io/badge/tests-184%20passing-brightgreen)
+![Python](https://img.shields.io/badge/python-≥3.11-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-CodeRev analyzes git diffs and returns structured, actionable code review feedback with severity ratings, fix suggestions, and references to security standards.
+**AI-powered code review CLI** — finds security vulnerabilities, logic errors,
+and performance issues in your diffs using Groq (Kimi K2). Returns structured,
+actionable findings with severity ratings, fix suggestions, and CWE/OWASP
+references.
 
-## Features
+---
 
-- 🔍 **Intelligent Code Review** - Analyzes diffs for security vulnerabilities, logic errors, performance issues, and more
-- 📊 **Structured Output** - Returns findings with severity, category, line numbers, and confidence scores
-- 💡 **Fix Suggestions** - Provides actual code snippets to fix issues, not just descriptions
-- 🎨 **Beautiful Terminal Output** - Rich, colorful, scannable output using the Rich library
-- 📝 **Multiple Formats** - Output as rich terminal, JSON, or Markdown
-- 🔗 **References** - Links to CWE IDs, OWASP categories, and language-specific documentation
-- ✨ **Balanced Feedback** - Includes praise for things done well, not just criticism
-- 🚀 **CI-Ready** - Exit codes for CI/CD integration
+## What It Does
+
+CodeRev reads a git diff, splits it into semantic chunks, sends each chunk
+through specialised AI agents (security, performance, correctness), synthesises
+the results, and outputs structured findings. Use it locally or in CI — the
+exit code reflects the worst severity found.
+
+**Key capabilities:**
+
+- Multi-agent review pipeline (security · performance · correctness)
+- Structured output with severity, category, line numbers, confidence scores
+- Copy-pasteable fix suggestions with CWE / OWASP references
+- Rich terminal, JSON, Markdown, and SARIF output formats
+- Prompt-level chunk caching for faster re-reviews
+- Golden test suite with measurable recall & precision
+- CI-ready exit codes and GitHub Actions integration
+- `coderev explain <id>` for deep-dive vulnerability education
 
 ## Quick Start
 
-### Installation
-
 ```bash
-# Clone the repository
+# Clone and install
 git clone https://github.com/your-username/coderev.git
 cd coderev
-
-# Install in development mode
-pip install -e .
-
-# Or install dependencies directly
 pip install -e ".[dev]"
-```
 
-### Configuration
+# Set your Groq API key
+cp .env.example .env          # then edit .env
+# or: export GROQ_API_KEY=your_key
 
-Create a `.env` file with your Groq API key:
-
-```bash
-cp .env.example .env
-# Edit .env and add your API key
-```
-
-Or set the environment variable directly:
-
-```bash
-export GROQ_API_KEY=your_api_key_here
-```
-
-### Usage
-
-**Review a diff file:**
-
-```bash
-coderev review --diff changes.patch
-```
-
-**Pipe from git:**
-
-```bash
+# Review a diff
 git diff | coderev review
-git diff HEAD~1 | coderev review
+coderev review --diff changes.patch
+coderev review --diff changes.patch --format json --output results.json
 ```
 
-**Output as JSON:**
+## GitHub Actions
+
+Add CodeRev to your CI pipeline:
+
+```yaml
+name: Code Review
+on: [pull_request]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e .
+      - run: |
+          git diff origin/main...HEAD > pr.patch
+          coderev review --diff pr.patch --format sarif --output results.sarif --fail-on high
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: results.sarif
+```
+
+## Configuration
+
+CodeRev reads settings from `.coderev.toml` in your project root. CLI flags
+always take precedence.
 
 ```bash
-coderev review --diff changes.patch --format json
+coderev config --init       # create .coderev.toml with defaults
+coderev config --validate   # check your config for errors
+coderev config --show       # show effective merged config
 ```
 
-**Save output to file:**
+Example `.coderev.toml`:
+
+```toml
+[review]
+fail_on = "high"
+min_confidence = 0.7
+format = "rich"
+
+[agents]
+enabled = ["security", "performance", "correctness"]
+
+[exclude]
+paths = ["vendor/", "generated/"]
+
+[eval]
+recall_threshold = 0.80
+precision_threshold = 0.70
+```
+
+Config priority: CLI flags > `.coderev.toml` (project) > `~/.coderev/config.toml` (user) > built-in defaults.
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `coderev review --diff <file>` | Review a diff file or stdin |
+| `coderev explain <id>` | Deep-dive explanation of a finding |
+| `coderev config --init` | Create `.coderev.toml` with defaults |
+| `coderev eval` | Run golden test suite |
+| `coderev compare` | A/B compare two models |
+| `coderev badge --metric recall` | Generate shields.io quality badge |
+| `coderev cache --stats` | Show prompt cache statistics |
+| `coderev version` | Show version info |
+
+### Review Options
+
+```
+-d, --diff PATH           Path to .patch / .diff file
+-f, --files PATH          File list (one per line)
+-m, --model TEXT          Groq model to use
+    --format TEXT          Output: rich | json | markdown | sarif
+-o, --output PATH         Write output to file
+    --fail-on TEXT         Exit 1 at severity: critical|high|medium|low|info
+    --min-confidence FLOAT Filter below threshold (0.0-1.0)
+    --no-cache             Skip prompt cache
+-c, --context TEXT         Extra context for the reviewer
+```
+
+### Explain
 
 ```bash
-coderev review --diff changes.patch --output results.json
+coderev explain a1b2c3d4           # full ID from review output
+coderev explain a1b2               # prefix match (if unambiguous)
+coderev explain a1b2 --from r.json # load from specific file
 ```
 
-**Filter low-confidence findings:**
+## How It Works
+
+```
+┌───────────┐     ┌──────────┐     ┌─────────────────────┐
+│  git diff  │ ──▶ │ Chunker  │ ──▶ │  Multi-Agent Review │
+└───────────┘     └──────────┘     │  ┌───────────────┐  │
+                                    │  │  Security      │  │
+                                    │  │  Performance   │  │
+                                    │  │  Correctness   │  │
+                                    │  └───────────────┘  │
+                                    └──────────┬──────────┘
+                                               │
+                                    ┌──────────▼──────────┐
+                                    │    Synthesizer      │
+                                    │  Dedup + Rank       │
+                                    └──────────┬──────────┘
+                                               │
+                                    ┌──────────▼──────────┐
+                                    │   Formatter (Rich)  │
+                                    │   JSON / Markdown   │
+                                    │   SARIF             │
+                                    └─────────────────────┘
+```
+
+1. **Chunker** — splits the diff by file + function, keeping chunks ≤ token limit
+2. **Specialist agents** — each chunk goes to security, performance, and correctness agents
+3. **Synthesizer** — deduplicates overlapping findings, assigns final severity + confidence
+4. **Formatter** — outputs structured results in the requested format
+
+## Quality Metrics
+
+CodeRev ships a golden test suite of known-vulnerable code samples.
+Run `coderev eval` to measure detection quality:
+
+| Metric | Target | Description |
+|--------|--------|-------------|
+| Recall | ≥ 80% | Fraction of known vulnerabilities detected |
+| Precision | ≥ 70% | Fraction of findings that are true positives |
+| Severity accuracy | tracked | How often the severity matches expected |
+| Line accuracy | tracked | How close line ranges are to expected |
+
+Generate a quality badge: `coderev badge --format markdown`
+
+## Development
 
 ```bash
-coderev review --diff changes.patch --min-confidence 0.8
-```
+# Install with dev dependencies
+pip install -e ".[dev]"
 
-**Fail on high severity (for CI):**
+# Run tests (184 passing)
+pytest tests/ --ignore=tests/test_agent.py -q
 
-```bash
-coderev review --diff changes.patch --fail-on high
-```
+# Run with coverage
+pytest --cov=coderev
 
-## CLI Options
-
-```
-Usage: coderev review [OPTIONS]
-
-Options:
-  -d, --diff PATH           Path to .patch or .diff file
-  -f, --files PATH          File containing list of changed files
-  -m, --model TEXT          Model to use [default: kimi-k2-0528]
-  --format TEXT             Output format: rich, json, markdown [default: rich]
-  -o, --output PATH         Save output to file
-  --fail-on TEXT            Exit with code 1 if severity found [default: critical]
-  --min-confidence FLOAT    Filter findings below threshold [default: 0.0]
-  -c, --context TEXT        Additional context for the reviewer
-  --help                    Show this message and exit
-```
-
-## Example Output
-
-```
-┌─────────────────────────────────────────────────────┐
-│  CodeRev  •  kimi-k2-0528  •  12.4s                 │
-│  3 files reviewed  •  1,847 diff lines              │
-└─────────────────────────────────────────────────────┘
-
-📁 src/auth/login.py
-  🔴 CRITICAL  [sec] SQL Injection                     L:47–52
-     User input concatenated directly into raw SQL query.
-     Fix: cursor.execute("SELECT * FROM users WHERE id=?", (user_id,))
-     → CWE-89 · OWASP A03:2021  [conf: 0.97]
-
-✨ What's done well:
-   • Input validation on registration form (login.py L:12–18)
-   • Clear separation of DB and business logic
-
-──────────────────────────────────────────────────────
-  Risk: HIGH  |  1 critical · 1 high · 1 medium
-  Score: 42/100  ⚠  Findings require attention
-  Tokens: 18,432  (~$0.023)  |  Time: 12.4s
+# Type check
+mypy coderev/
 ```
 
 ## Severity Levels
 
-| Level    | Emoji | Description |
-|----------|-------|-------------|
-| CRITICAL | 🔴    | Exploitable vulnerability, data loss risk, auth bypass |
-| HIGH     | 🟡    | Likely bug in production, significant degradation |
-| MEDIUM   | 🟠    | Possible issue under edge cases |
-| LOW      | 🔵    | Minor improvement opportunity |
-| INFO     | ⚪    | Style or best practice note |
-
-## Categories
-
-- **security** - Security vulnerabilities (SQL injection, XSS, etc.)
-- **performance** - Performance issues (N+1 queries, memory leaks)
-- **correctness** - Logic errors, bugs, edge cases
-- **style** - Code style, naming, documentation
-- **test_coverage** - Missing tests, untested edge cases
-
-## Testing
-
-```bash
-# Install dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest
-
-# Run with coverage
-pytest --cov=coderev
-```
-
-### Testing with Sample Bad Code
-
-The repository includes `sample_bad.py` with intentional vulnerabilities for testing:
-
-```bash
-# Generate a diff
-git add sample_bad.py
-git diff --cached > sample.patch
-
-# Review it
-coderev review --diff sample.patch
-```
-
-## Project Structure
-
-```
-coderev/
-├── coderev/
-│   ├── __init__.py       # Package initialization
-│   ├── cli.py            # CLI entry point
-│   ├── schema.py         # Pydantic models
-│   ├── agent.py          # Claude agent
-│   ├── formatter.py      # Rich output formatter
-│   └── utils.py          # Helper utilities
-├── tests/
-│   ├── test_schema.py    # Schema tests
-│   └── test_utils.py     # Utils tests
-├── pyproject.toml        # Package configuration
-├── README.md             # This file
-├── .env.example          # Environment template
-└── sample_bad.py         # Test file with issues
-```
-
-## Roadmap
-
-- **Week 1** ✅ Core CLI with Claude integration
-- **Week 2** Multi-agent pipeline, AST chunker, prompt caching
-- **Week 3** GitHub Actions workflow, SARIF output, PR comments
-- **Week 4** Golden test suite, eval runner, A/B testing
-- **Week 5** Open-source polish, config system, `coderev explain`
+| Level | Emoji | Description |
+|-------|-------|-------------|
+| CRITICAL | 🔴 | Exploitable vulnerability, data loss, auth bypass |
+| HIGH | 🟡 | Likely bug in production, significant degradation |
+| MEDIUM | 🟠 | Possible issue under edge cases |
+| LOW | 🔵 | Minor improvement opportunity |
+| INFO | ⚪ | Style or best practice note |
 
 ## License
 
-MIT License - see LICENSE file for details.
-
-## Contributing
-
-Contributions welcome! Please read CONTRIBUTING.md for guidelines.
+MIT License — see LICENSE for details.

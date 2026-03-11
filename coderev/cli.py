@@ -1,7 +1,7 @@
 """CLI entry point for CodeRev.
 
 All CLI commands are defined here using Typer.
-Future commands (explain, config, etc.) will be added to this module.
+Commands: review, cache, eval, compare, config, explain, badge, version
 """
 
 import os
@@ -90,20 +90,20 @@ def review(
         ),
     ] = None,
     model: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             "--model",
             "-m",
             help="Model to use",
         ),
-    ] = "moonshotai/kimi-k2-instruct",
+    ] = None,
     format: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             "--format",
-            help="Output format: rich, json, or markdown",
+            help="Output format: rich, json, markdown, sarif",
         ),
-    ] = "rich",
+    ] = None,
     output: Annotated[
         Optional[Path],
         typer.Option(
@@ -113,21 +113,21 @@ def review(
         ),
     ] = None,
     fail_on: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             "--fail-on",
             help="Exit with code 1 if severity found (critical, high, medium, low, info)",
         ),
-    ] = "critical",
+    ] = None,
     min_confidence: Annotated[
-        float,
+        Optional[float],
         typer.Option(
             "--min-confidence",
             help="Filter out findings below this confidence threshold (0.0-1.0)",
             min=0.0,
             max=1.0,
         ),
-    ] = 0.0,
+    ] = None,
     no_cache: Annotated[
         bool,
         typer.Option(
@@ -147,22 +147,43 @@ def review(
     """Review a git diff using Kimi K2 AI.
     
     Reads diff from --diff file or stdin (e.g., git diff | coderev review).
+    Defaults are read from .coderev.toml when CLI flags are not provided.
     
     Examples:
         coderev review --diff changes.patch
         git diff | coderev review
         coderev review --diff changes.patch --format json --output results.json
     """
+    from .config import load_config
+
+    # Load config for defaults
+    try:
+        cfg = load_config()
+    except ValueError:
+        cfg = None
+
+    # Apply config defaults for unset flags
+    effective_format = format or (cfg.review.format if cfg else "rich")
+    effective_fail_on = fail_on or (
+        cfg.review.fail_on.value if cfg and cfg.review.fail_on else "critical"
+    )
+    effective_min_confidence = (
+        min_confidence if min_confidence is not None
+        else (cfg.review.min_confidence if cfg else 0.0)
+    )
+    effective_model = model or (cfg.review.model if cfg else "moonshotai/kimi-k2-instruct")
+    effective_no_cache = no_cache or (cfg.review.no_cache if cfg else False)
+
     # Validate format
     valid_formats = ["rich", "json", "markdown", "sarif"]
-    if format not in valid_formats:
-        console.print(f"[red]Error:[/red] Invalid format '{format}'. Use one of: {', '.join(valid_formats)}")
+    if effective_format not in valid_formats:
+        console.print(f"[red]Error:[/red] Invalid format '{effective_format}'. Use one of: {', '.join(valid_formats)}")
         raise typer.Exit(1)
     
     # Validate fail-on
     valid_severities = ["critical", "high", "medium", "low", "info"]
-    if fail_on.lower() not in valid_severities:
-        console.print(f"[red]Error:[/red] Invalid severity '{fail_on}'. Use one of: {', '.join(valid_severities)}")
+    if effective_fail_on.lower() not in valid_severities:
+        console.print(f"[red]Error:[/red] Invalid severity '{effective_fail_on}'. Use one of: {', '.join(valid_severities)}")
         raise typer.Exit(1)
     
     # Get API key
@@ -173,7 +194,7 @@ def review(
         raise typer.Exit(1)
 
     # Use env override for model if set
-    model = os.getenv("CODEREV_MODEL", model)
+    effective_model = os.getenv("CODEREV_MODEL", effective_model)
     
     # Read diff content
     diff_content: Optional[str] = None
@@ -213,15 +234,15 @@ def review(
         file_paths = ["unknown"]
     
     # Show progress for rich format
-    if format == "rich":
-        console.print(f"[dim]Reviewing {len(file_paths)} file(s) with {model}...[/dim]")
+    if effective_format == "rich":
+        console.print(f"[dim]Reviewing {len(file_paths)} file(s) with {effective_model}...[/dim]")
     
     # Initialize pipeline and run review
     try:
         pipeline = ReviewPipeline(
             api_key=api_key,
-            model=model,
-            use_cache=not no_cache,
+            model=effective_model,
+            use_cache=not effective_no_cache,
         )
         result = pipeline.run(
             diff=diff_content,
@@ -233,58 +254,65 @@ def review(
         raise typer.Exit(1)
     
     # Filter findings by confidence
-    if min_confidence > 0:
+    if effective_min_confidence > 0:
         original_count = len(result.findings)
         result.findings = [
             f for f in result.findings 
-            if f.confidence >= min_confidence
+            if f.confidence >= effective_min_confidence
         ]
         filtered_count = original_count - len(result.findings)
-        if filtered_count > 0 and format == "rich":
+        if filtered_count > 0 and effective_format == "rich":
             console.print(f"[dim]Filtered {filtered_count} low-confidence finding(s)[/dim]")
     
+    # Save result for coderev explain
+    from .explain import save_last_result
+    try:
+        save_last_result(result)
+    except Exception:
+        pass  # non-critical — don't fail the review
+
     # SARIF format handled separately — not part of the Formatter class
-    if format == "sarif":
+    if effective_format == "sarif":
         from .sarif import sarif_to_string
         formatted_output = sarif_to_string(result)
         print(formatted_output)
         if output:
             output.write_text(formatted_output, encoding="utf-8")
             console.print(f"[dim]SARIF results saved to {output}[/dim]", stderr=True)
-        exit_code = get_severity_exit_code(result.findings, fail_on)
+        exit_code = get_severity_exit_code(result.findings, effective_fail_on)
         raise typer.Exit(exit_code)
 
     # Format output
     formatter = Formatter(console)
     formatted_output = formatter.format(
         result=result,
-        format_type=format,
+        format_type=effective_format,
         input_tokens=input_tokens,
         output_tokens=output_tokens
     )
     
     # For json/markdown, print the output (plain print to avoid Rich markup)
-    if format in ["json", "markdown"]:
+    if effective_format in ["json", "markdown"]:
         print(formatted_output)
     
     # Save to file if requested
     if output:
         try:
-            if format == "rich":
+            if effective_format == "rich":
                 # For rich format, save as JSON when writing to file
                 file_content = result.model_dump_json(indent=2)
             else:
                 file_content = formatted_output
             
             output.write_text(file_content, encoding="utf-8")
-            if format == "rich":
+            if effective_format == "rich":
                 console.print(f"[dim]Results saved to {output}[/dim]")
         except Exception as e:
             console.print(f"[red]Error saving output:[/red] {e}")
             raise typer.Exit(1)
     
     # Determine exit code
-    exit_code = get_severity_exit_code(result.findings, fail_on)
+    exit_code = get_severity_exit_code(result.findings, effective_fail_on)
     raise typer.Exit(exit_code)
 
 
@@ -479,15 +507,339 @@ def compare(
         label_b="Variant B (new)",
     )
 
+    import re
+    def _to_key(label: str) -> str:
+        return re.sub(r'[^a-z0-9_]', '_', label.lower()).strip('_')
+
+    key_a = _to_key("Variant A (current)")
+    key_b = _to_key("Variant B (new)")
+
     console.print(f"\n  Results:")
-    console.print(f"  Variant A wins: {tournament.get('Variant A (current)_wins', 0)}/{runs}")
-    console.print(f"  Variant B wins: {tournament.get('Variant B (new)_wins', 0)}/{runs}")
+    console.print(f"  Variant A wins: {tournament.get(f'{key_a}_wins', 0)}/{runs}")
+    console.print(f"  Variant B wins: {tournament.get(f'{key_b}_wins', 0)}/{runs}")
     console.print(f"  Ties:           {tournament.get('ties', 0)}/{runs}")
     console.print(f"\n  Recommendation: {tournament.get('recommendation', '')}\n")
 
     if output:
         output.write_text(json_mod.dumps(tournament, indent=2))
         console.print(f"  Saved to: {output}\n")
+
+
+@app.command()
+def config(
+    init: Annotated[
+        bool,
+        typer.Option(
+            "--init",
+            help="Create a .coderev.toml with commented defaults in the current directory",
+        ),
+    ] = False,
+    validate: Annotated[
+        bool,
+        typer.Option(
+            "--validate",
+            help="Validate the current .coderev.toml and show parsed values",
+        ),
+    ] = False,
+    show: Annotated[
+        bool,
+        typer.Option(
+            "--show",
+            help="Show the active config (merged from all sources)",
+        ),
+    ] = False,
+) -> None:
+    """Manage CodeRev configuration.
+
+    Examples:
+        coderev config --init       # create .coderev.toml with defaults
+        coderev config --validate   # check your config file for errors
+        coderev config --show       # show the active merged config
+    """
+    from .config import load_config, find_project_config, write_default_config
+
+    if init:
+        config_path = Path.cwd() / ".coderev.toml"
+        if config_path.exists():
+            typer.echo(f".coderev.toml already exists at {config_path}")
+            raise typer.Exit(1)
+        write_default_config(config_path)
+        typer.echo(f"Created {config_path}")
+        typer.echo("Edit it to customize your CodeRev settings.")
+        return
+
+    if validate:
+        project_config = find_project_config()
+        if not project_config:
+            typer.echo("No .coderev.toml found in this directory or parents.")
+            typer.echo("Run 'coderev config --init' to create one.")
+            raise typer.Exit(1)
+        try:
+            cfg = load_config()
+            typer.echo(f"{project_config} is valid")
+            typer.echo(f"  fail_on:        {cfg.review.fail_on}")
+            typer.echo(f"  min_confidence: {cfg.review.min_confidence}")
+            typer.echo(f"  format:         {cfg.review.format}")
+            typer.echo(f"  agents enabled: {cfg.agents.enabled}")
+            if cfg.exclude.paths:
+                typer.echo(f"  excluded paths: {cfg.exclude.paths}")
+        except ValueError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+        return
+
+    if show:
+        cfg = load_config()
+        typer.echo("\nActive CodeRev config (merged from all sources):\n")
+        typer.echo(f"  [review]")
+        typer.echo(f"    fail_on:        {cfg.review.fail_on or 'none'}")
+        typer.echo(f"    min_confidence: {cfg.review.min_confidence}")
+        typer.echo(f"    format:         {cfg.review.format}")
+        typer.echo(f"    model:          {cfg.review.model}")
+        typer.echo(f"    no_cache:       {cfg.review.no_cache}")
+        typer.echo(f"  [agents]")
+        typer.echo(f"    enabled:        {cfg.agents.enabled}")
+        typer.echo(f"  [exclude]")
+        typer.echo(f"    paths:          {cfg.exclude.paths or '(none)'}")
+        typer.echo(f"    categories:     {[c.value for c in cfg.exclude.categories] or '(none)'}")
+        typer.echo(f"  [eval]")
+        typer.echo(f"    recall_threshold:    {cfg.eval.recall_threshold}")
+        typer.echo(f"    precision_threshold: {cfg.eval.precision_threshold}")
+        return
+
+    # Default: show help
+    typer.echo("Use --init, --validate, or --show. See: coderev config --help")
+
+
+@app.command()
+def explain(
+    finding_id: Annotated[
+        str,
+        typer.Argument(
+            help="Finding ID to explain (full or prefix, e.g. 'a1b2c3d4' or 'a1b2')",
+        ),
+    ],
+    result_file: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--from",
+            help="Load findings from this JSON file instead of last review",
+            exists=True,
+        ),
+    ] = None,
+) -> None:
+    """Get a detailed explanation of a code review finding.
+
+    Finding IDs appear in square brackets in review output: [a1b2c3d4]
+    Partial IDs work as long as they're unambiguous: coderev explain a1b2
+
+    Examples:
+        coderev explain a1b2c3d4
+        coderev explain a1b2
+        coderev explain a1b2c3d4 --from my_review.json
+    """
+    from .explain import ExplainAgent, load_last_result, find_finding_by_id
+    from .schema import CodeReviewResult
+    from rich.panel import Panel
+    from rich import box
+
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        console.print("[red]Error:[/red] GROQ_API_KEY not set", err=True)
+        raise typer.Exit(1)
+
+    # Load result
+    if result_file:
+        try:
+            result = CodeReviewResult.model_validate_json(result_file.read_text())
+        except Exception as e:
+            console.print(f"[red]Error:[/red] Could not load {result_file}: {e}", err=True)
+            raise typer.Exit(1)
+    else:
+        result = load_last_result()
+        if result is None:
+            console.print(
+                "[red]Error:[/red] No previous review found.\n"
+                "   Run 'coderev review --diff <file>' first, then explain a finding.\n"
+                "   Or use --from to specify a review JSON file.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+    # Find the finding
+    try:
+        finding = find_finding_by_id(result, finding_id)
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}", err=True)
+        raise typer.Exit(1)
+
+    if finding is None:
+        available = "\n".join(
+            f"  [{f.id}] {f.title}" for f in result.findings
+        )
+        console.print(
+            f"[red]Error:[/red] Finding '{finding_id}' not found in last review.\n\n"
+            f"Available findings:\n{available}",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Generate explanation
+    console.print(f"\n[dim]Generating explanation for [{finding.id}]...[/dim]")
+
+    agent = ExplainAgent(api_key=api_key)
+    explanation = agent.explain(finding)
+
+    # Display
+    severity_colors = {
+        "critical": "bold red",
+        "high": "bold orange1",
+        "medium": "bold yellow",
+        "low": "bold blue",
+        "info": "dim",
+    }
+    sev_style = severity_colors.get(finding.severity.value, "white")
+    location = f"{finding.file_path}"
+    if finding.line_range:
+        location += f":{finding.line_range.start}"
+
+    header = (
+        f"[bold]{finding.title}[/bold]\n"
+        f"[dim]Category:[/dim] {finding.category.value}  "
+        f"[dim]Severity:[/dim] [{sev_style}]{finding.severity.value.upper()}[/{sev_style}]  "
+        f"[dim]Location:[/dim] {location}"
+    )
+
+    body_parts = [
+        f"[bold cyan]WHAT IS THIS?[/bold cyan]\n{explanation.what_is_this}",
+        f"[bold cyan]WHY IS THIS VULNERABLE?[/bold cyan]\n{explanation.why_vulnerable}",
+        f"[bold cyan]HOW TO FIX IT[/bold cyan]\n{explanation.how_to_fix}",
+    ]
+
+    if explanation.real_world_examples:
+        examples = "\n".join(f"  {ex}" for ex in explanation.real_world_examples)
+        body_parts.append(f"[bold cyan]REAL WORLD IMPACT[/bold cyan]\n{examples}")
+
+    if explanation.references:
+        refs = "\n".join(f"  {ref}" for ref in explanation.references)
+        body_parts.append(f"[bold cyan]REFERENCES[/bold cyan]\n{refs}")
+
+    body = "\n\n".join(body_parts)
+
+    console.print(Panel(
+        f"{header}\n\n{body}",
+        title=f"[bold]Finding [{finding.id}][/bold]",
+        border_style=sev_style,
+        box=box.ROUNDED,
+        padding=(1, 2),
+    ))
+    console.print()
+
+
+@app.command()
+def badge(
+    metric: Annotated[
+        str,
+        typer.Option(
+            "--metric",
+            help="Metric to show: recall | precision | tests",
+        ),
+    ] = "recall",
+    output: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--output", "-o",
+            help="Write badge URL to file",
+        ),
+    ] = None,
+    format: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="Output format: url | markdown | html",
+        ),
+    ] = "url",
+) -> None:
+    """Generate a shields.io quality badge from eval results.
+
+    Reads results/eval_history.json and outputs a badge URL showing
+    the latest recall score. Paste into README.md.
+
+    Examples:
+        coderev badge
+        coderev badge --metric precision
+        coderev badge --format markdown
+    """
+    import json as json_mod
+    from urllib.parse import quote
+
+    history_path = Path("results/eval_history.json")
+    if not history_path.exists():
+        typer.echo(
+            "results/eval_history.json not found.\n"
+            "Run 'coderev eval' first to generate quality metrics.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    history = json_mod.loads(history_path.read_text())
+    if not history:
+        typer.echo("eval_history.json is empty. Run 'coderev eval' first.", err=True)
+        raise typer.Exit(1)
+
+    latest = history[-1]["summary"]
+
+    if metric == "recall":
+        value = f"{latest['avg_recall']:.0%}"
+        label = "AI Recall"
+        color = (
+            "brightgreen" if latest["avg_recall"] >= 0.90
+            else "green" if latest["avg_recall"] >= 0.80
+            else "yellow" if latest["avg_recall"] >= 0.70
+            else "red"
+        )
+    elif metric == "precision":
+        value = f"{latest['avg_precision']:.0%}"
+        label = "AI Precision"
+        color = (
+            "brightgreen" if latest["avg_precision"] >= 0.85
+            else "green" if latest["avg_precision"] >= 0.70
+            else "yellow" if latest["avg_precision"] >= 0.60
+            else "red"
+        )
+    elif metric == "tests":
+        import subprocess
+        import re as re_mod
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "tests/", "--ignore=tests/test_agent.py", "-q", "--tb=no"],
+            capture_output=True, text=True,
+        )
+        match = re_mod.search(r"(\d+) passed", proc.stdout)
+        count = match.group(1) if match else "?"
+        value = f"{count} passing"
+        label = "tests"
+        color = "brightgreen"
+    else:
+        typer.echo(f"Unknown metric: {metric}. Use: recall | precision | tests", err=True)
+        raise typer.Exit(1)
+
+    # Build shields.io URL
+    encoded_label = quote(label)
+    encoded_value = quote(value)
+    badge_url = f"https://img.shields.io/badge/{encoded_label}-{encoded_value}-{color}"
+
+    if format == "markdown":
+        output_str = f"![{label}]({badge_url})"
+    elif format == "html":
+        output_str = f'<img alt="{label}" src="{badge_url}">'
+    else:
+        output_str = badge_url
+
+    typer.echo(output_str)
+
+    if output:
+        output.write_text(output_str, encoding="utf-8")
+        typer.echo(f"\nSaved to: {output}", err=True)
 
 
 # Entry point for direct execution
