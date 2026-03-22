@@ -53,3 +53,4 @@ merge.patch
 # Eval results (runtime artifacts)
 results/
 weekly.patch
+cleanup_backup_*/
